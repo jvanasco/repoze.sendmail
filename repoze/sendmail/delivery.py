@@ -31,22 +31,24 @@ import transaction
 from transaction.interfaces import ISavepointDataManager
 from transaction.interfaces import IDataManagerSavepoint
 
+import logging
+log = logging.getLogger('repoze.sendmail.delivery')
 
 class MailDataManagerState(object):
     """MailDataManagerState consolidates all the possible MDM and TPC states.
-    Most of these are not needed and were removed from the actual logic.
     This was modeled loosely after the Zope.Sqlaclhemy extension.
     """
     INIT = 0
     NO_WORK = 1
     COMMITTED = 2
     ABORTED = 3
-    TPC_NONE = 11
-    TPC_BEGIN = 12
-    TPC_VOTED = 13
-    TPC_COMMITED = 14
-    TPC_FINISHED = 15
-    TPC_ABORTED = 16
+
+    TPC_NONE = 10
+    TPC_DIDBEGIN = 11
+    TPC_VOTED = 12
+    TPC_ABORTED  = 14
+    TPC_FINISHED  = 15
+
 
 
 @implementer(ISavepointDataManager)
@@ -63,6 +65,7 @@ class MailDataManager(object):
     """
     def __init__(self, callable, args=(), onAbort=None,
                  transaction_manager=None):
+        log.debug("MailDataManager.__init__")
         self.callable = callable
         self.args = args
         self.onAbort = onAbort
@@ -71,7 +74,26 @@ class MailDataManager(object):
         self.transaction_manager = transaction_manager
         self.transaction = None
         self.state = MailDataManagerState.INIT
-        self.tpc_phase = 0
+        self.tpc_phase = MailDataManagerState.TPC_NONE
+        
+        
+    def _transaction_ensure(self, trans=None):
+        """shared function"""
+        if self.transaction is None:
+            raise ValueError("Not in a transaction")
+        if self.transaction is not trans:
+            raise ValueError("In a different transaction")
+
+
+    def _finish(self, final_state, final_tpc_phase=None):
+        """this just records the states"""
+        if self.transaction is None:
+            raise ValueError("Not in a transaction")    ## to pass : `test__finish_wo_transaction`
+        self.state = final_state
+        if final_tpc_phase is not None:
+            self.tpc_phase = final_tpc_phase
+
+
 
     def join_transaction(self, trans=None):
         """Join the object into a transaction.
@@ -80,6 +102,7 @@ class MailDataManager(object):
 
         Raise an error if the object is already in a different transaction.
         """
+        log.debug("MailDataManager.join_transaction")
         _before = self.transaction
 
         if trans is not None:
@@ -98,24 +121,15 @@ class MailDataManager(object):
 
         self.transaction = _after
 
-    def _finish(self, final_state):
-        if self.transaction is None:
-            raise ValueError("Not in a transaction")
-        self.state = final_state
-
     def commit(self, trans):
-        if self.transaction is None:
-            raise ValueError("Not in a transaction")
-        if self.transaction is not trans:
-            raise ValueError("In a different transaction")
+        log.debug("MailDataManager.commit")
+        self._transaction_ensure(trans=trans)
         # OK to call ``commit`` w/ TPC underway
 
     def abort(self, trans):
-        if self.transaction is None:
-            raise ValueError("Not in a transaction")
-        if self.transaction is not trans:
-            raise ValueError("In a different transaction")
-        if self.tpc_phase != 0:
+        log.debug("MailDataManager.abort")
+        self._transaction_ensure(trans=trans)
+        if self.tpc_phase != MailDataManagerState.TPC_NONE :
             raise ValueError("TPC in progress")
         if self.onAbort:
             self.onAbort()
@@ -129,50 +143,68 @@ class MailDataManager(object):
         Although it has a `rollback` method, the custom instance doesn't
         actually do anything. `transaction` does it all.
         """
+        log.debug("MailDataManager.savepoint")
         if self.transaction is None:
             raise ValueError("Not in a transaction")
         return MailDataSavepoint(self)
 
+
     def tpc_begin(self, trans, subtransaction=False):
-        if self.transaction is None:
-            raise ValueError("Not in a transaction")
-        if self.transaction is not trans:
-            raise ValueError("In a different transaction")
-        if self.tpc_phase != 0:
+        log.debug("MailDataManager.tpc_begin")
+        self._transaction_ensure(trans=trans)
+        if self.tpc_phase != MailDataManagerState.TPC_NONE :
             raise ValueError("TPC in progress")
         if subtransaction:
             raise ValueError("Subtransactions not supported")
-        self.tpc_phase = 1
+        self.tpc_phase = MailDataManagerState.TPC_DIDBEGIN
 
     def tpc_vote(self, trans):
-        if self.transaction is None:
-            raise ValueError("Not in a transaction")
-        if self.transaction is not trans:
-            raise ValueError("In a different transaction")
-        if self.tpc_phase != 1:
-            raise ValueError("TPC phase error: %d" % self.tpc_phase)
-        self.tpc_phase = 2
+        log.debug("MailDataManager.tpc_vote")
+        self._transaction_ensure(trans=trans)
+        # for a one phase data manager commit last in tpc_vote
+        if self.tpc_phase != MailDataManagerState.TPC_DIDBEGIN:
+            raise ValueError("TPC phase error: got %d , expected %d" % 
+                (self.tpc_phase, MailDataManagerState.TPC_DIDBEGIN) )
+        self.state = MailDataManagerState.COMMITTED
+        self.tpc_phase = MailDataManagerState.TPC_VOTED
 
     def tpc_finish(self, trans):
-        if self.transaction is None:
-            raise ValueError("Not in a transaction")
-        if self.transaction is not trans:
-            raise ValueError("In a different transaction")
-        if self.tpc_phase != 2:
-            raise ValueError("TPC phase error: %d" % self.tpc_phase)
+        log.debug("MailDataManager.tpc_finish")
+        self._transaction_ensure(trans=trans)
+        if self.tpc_phase != MailDataManagerState.TPC_VOTED:
+            raise ValueError("TPC phase error: got %d , expected %d" % 
+                (self.tpc_phase, MailDataManagerState.TPC_VOTED) )
         self.callable(*self.args)
-        self._finish(MailDataManagerState.TPC_FINISHED)
+        self._finish(MailDataManagerState.COMMITTED, MailDataManagerState.TPC_FINISHED)
 
     def tpc_abort(self, trans):
-        if self.transaction is None:
-            raise ValueError("Not in a transaction")
-        if self.transaction is not trans:
-            raise ValueError("In a different transaction")
-        if self.tpc_phase == 0:
-            raise ValueError("TPC phase error: %d" % self.tpc_phase)
-        if self.state is MailDataManagerState.TPC_FINISHED:
-            raise ValueError("TPC already finished")
-        self._finish(MailDataManagerState.TPC_ABORTED)
+        log.debug("MailDataManager.tpc_abort")
+        self._transaction_ensure(trans=trans)
+        if self.tpc_phase == MailDataManagerState.TPC_NONE :
+            raise ValueError("TPC phase error: got %d , expected !%d" % 
+                (self.tpc_phase, MailDataManagerState.TPC_NONE) )
+        elif self.tpc_phase == MailDataManagerState.TPC_FINISHED :
+            raise ValueError("TPC already finished")        
+        self._finish(MailDataManagerState.ABORTED, MailDataManagerState.TPC_ABORTED)
+
+
+class TwoPhaseMailDataManager(MailDataManager):
+
+    def tpc_vote(self, trans):
+        log.debug("TwoPhaseMailDataManager.tpc_vote")
+        if self.transaction is not None:  # there may have been no work to do
+            self._finish( MailDataManagerState.VOTED, MailDataManagerState.TPC_VOTED )
+
+    def tpc_finish(self, trans):
+        log.debug("TwoPhaseMailDataManager.tpc_finish")
+        if self.transaction is not None:  # there may have been no work to do
+            self._finish( MailDataManagerState.COMMITTED, MailDataManagerState.TPC_FINISHED )
+
+    def tpc_abort(self, trans):
+        log.debug("TwoPhaseMailDataManager.tpc_abort")
+        if self.transaction is not None:  # we may not have voted, and been aborted already
+            self._finish( MailDataManagerState.ABORTED, MailDataManagerState.TPC_ABORTED )
+
 
 
 @implementer(IDataManagerSavepoint)
@@ -180,6 +212,7 @@ class MailDataSavepoint:
     """Don't actually do anything; transaction does it all.
     """
     def __init__(self, mail_data_manager):
+        log.debug("MailDataSavepoint.__init__")
         pass
 
     def rollback(self):

@@ -13,6 +13,8 @@
 ##############################################################################
 import unittest
 
+from repoze.sendmail.delivery import MailDataManagerState
+
 
 class TestMailDataManager(unittest.TestCase):
 
@@ -78,7 +80,7 @@ class TestMailDataManager(unittest.TestCase):
         txn = DummyTransaction()
         mdm.join_transaction(txn)
         mdm._finish(2)
-        self.assertEqual(mdm.state, 2)
+        self.assertEqual(mdm.state, MailDataManagerState.COMMITTED)
 
     def test_commit_wo_transaction(self):
         mdm = self._makeOne(object)
@@ -96,7 +98,7 @@ class TestMailDataManager(unittest.TestCase):
         mdm = self._makeOne(object)
         txn = DummyTransaction()
         mdm.join_transaction(txn)
-        mdm.tpc_phase = 1
+        mdm.tpc_begin(txn)
         mdm.commit(txn) # no raise
 
     def test_commit_w_same_transaction(self):
@@ -121,7 +123,7 @@ class TestMailDataManager(unittest.TestCase):
         mdm = self._makeOne(object)
         txn = DummyTransaction()
         mdm.join_transaction(txn)
-        mdm.tpc_phase = 1
+        mdm.tpc_begin(txn)
         self.assertRaises(ValueError, mdm.abort, txn)
 
     def test_abort_w_same_transaction(self):
@@ -172,7 +174,7 @@ class TestMailDataManager(unittest.TestCase):
         mdm = self._makeOne()
         txn = DummyTransaction()
         mdm.join_transaction(txn)
-        mdm.tpc_phase = 1
+        mdm.tpc_begin(txn)
         self.assertRaises(ValueError, mdm.tpc_begin, txn)
 
     def test_tpc_begin_w_subtransaction(self):
@@ -186,7 +188,7 @@ class TestMailDataManager(unittest.TestCase):
         txn = DummyTransaction()
         mdm.join_transaction(txn)
         mdm.tpc_begin(txn)
-        self.assertEqual(mdm.tpc_phase, 1)
+        self.assertEqual(mdm.tpc_phase, MailDataManagerState.TPC_DIDBEGIN)
 
     def test_tpc_vote_wo_transaction(self):
         mdm = self._makeOne()
@@ -210,9 +212,9 @@ class TestMailDataManager(unittest.TestCase):
         mdm = self._makeOne()
         txn = DummyTransaction()
         mdm.join_transaction(txn)
-        mdm.tpc_phase = 1
+        mdm.tpc_begin(txn)
         mdm.tpc_vote(txn)
-        self.assertEqual(mdm.tpc_phase, 2)
+        self.assertEqual(mdm.tpc_phase, MailDataManagerState.TPC_VOTED)
 
     def test_tpc_finish_wo_transaction(self):
         mdm = self._makeOne()
@@ -236,7 +238,7 @@ class TestMailDataManager(unittest.TestCase):
         mdm = self._makeOne()
         txn = DummyTransaction()
         mdm.join_transaction(txn)
-        mdm.tpc_phase = 1
+        mdm.tpc_begin(txn)
         self.assertRaises(ValueError, mdm.tpc_finish, txn)
 
     def test_tpc_finish_ok(self):
@@ -247,10 +249,11 @@ class TestMailDataManager(unittest.TestCase):
         mdm = self._makeOne(_callable, (1, 2))
         txn = DummyTransaction()
         mdm.join_transaction(txn)
-        mdm.tpc_phase = 2
+        mdm.tpc_begin(txn)
+        mdm.tpc_vote(txn)
         mdm.tpc_finish(txn)
         self.assertEqual(_called, [(1, 2)])
-        self.assertEqual(mdm.state, MailDataManagerState.TPC_FINISHED)
+        self.assertEqual(mdm.tpc_phase, MailDataManagerState.TPC_FINISHED)
 
     def test_tpc_abort_wo_transaction(self):
         mdm = self._makeOne()
@@ -275,8 +278,10 @@ class TestMailDataManager(unittest.TestCase):
         mdm = self._makeOne()
         txn = DummyTransaction()
         mdm.join_transaction(txn)
-        mdm.tpc_phase = 1
-        mdm.state = MailDataManagerState.TPC_FINISHED
+        mdm.tpc_begin(txn)
+        mdm.tpc_vote(txn)
+        mdm.tpc_finish(txn)
+        mdm.state = MailDataManagerState.COMMITTED
         self.assertRaises(ValueError, mdm.tpc_abort, txn)
 
     def test_tpc_abort_begun_ok(self):
@@ -284,18 +289,19 @@ class TestMailDataManager(unittest.TestCase):
         mdm = self._makeOne()
         txn = DummyTransaction()
         mdm.join_transaction(txn)
-        mdm.tpc_phase = 1
+        mdm.tpc_begin(txn)
         mdm.tpc_abort(txn)
-        self.assertEqual(mdm.state, MailDataManagerState.TPC_ABORTED)
+        self.assertEqual(mdm.tpc_phase, MailDataManagerState.TPC_ABORTED)
 
     def test_tpc_abort_voted_ok(self):
         from ..delivery import MailDataManagerState
         mdm = self._makeOne()
         txn = DummyTransaction()
         mdm.join_transaction(txn)
-        mdm.tpc_phase = 2
+        mdm.tpc_begin(txn)
+        mdm.tpc_vote(txn)
         mdm.tpc_abort(txn)
-        self.assertEqual(mdm.state, MailDataManagerState.TPC_ABORTED)
+        self.assertEqual(mdm.tpc_phase, MailDataManagerState.TPC_ABORTED)
 
 
 class TestAbstractMailDelivery(unittest.TestCase):
@@ -464,13 +470,23 @@ class TestDirectMailDelivery(unittest.TestCase):
         message.set_payload("This is just an example\n")
 
         msgid = delivery.send(fromaddr, toaddrs, message)
+        
+        print "ok..."
+        print mailer.sent_messages
 
         transaction.commit()
+        
+        print mailer.sent_messages
         self.assertEqual(len(mailer.sent_messages), 0)
         t = tm.get()
         data_manager = t._resources[0]
         self.assertTrue(data_manager.transaction_manager is tm)
+
+        print mailer.sent_messages
         t.commit()
+
+        print mailer.sent_messages
+
         self.assertEqual(len(mailer.sent_messages), 1)
         self.assertEqual(mailer.sent_messages[0][0], fromaddr)
         self.assertEqual(mailer.sent_messages[0][1], toaddrs)

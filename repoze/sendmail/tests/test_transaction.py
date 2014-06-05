@@ -102,6 +102,72 @@ class TestTransactionMails(unittest.TestCase):
                 sp.rollback()
         sp_outer.rollback()
         
+        
+        
+    def test_savepoint_abort(self):
+        return "TODO"
+    
+    
+        import transaction
+        
+        mailer = _makeMailerStub()
+        delivery = DirectMailDelivery(mailer)
+        ( fromaddr , toaddrs ) = fromaddr_toaddrs()
+        
+        bodies_good = {}
+        bodies_bad = {}
+        for i in ( 1,3,5, ):
+            bodies_good[i] = 'Sample Body - %s | Good' % i
+        for i in ( 2,4,6, ):
+            bodies_bad[i] = 'Sample Body - %s | Bad' % i
+            
+        bodies_all = dict(list(bodies_good.items()) +
+                          list(bodies_bad.items()))
+
+
+        transaction.begin()
+        for i in range(1,7) :
+            sp = transaction.savepoint()
+            body = bodies_all[i]
+            message = sample_message(body=body)
+            msgid = delivery.send(fromaddr, toaddrs, message)
+            self.assertEqual(msgid, '<20030519.1234@example.org>')
+            self.assertEqual(mailer.sent_messages, [])
+            if i in bodies_bad :
+                sp.rollback()
+        
+        # we shouldn't have sent anything
+        self.assertEqual(mailer.sent_messages, [])
+        
+        # so now let's commit
+        transaction.commit()
+        
+        # make sure we have the right number of messages
+        self.assertEqual(len(mailer.sent_messages), len(bodies_good.values()))
+
+        # generate our expected body
+        bodies_expected = bodies_good.values()
+
+        # make sure our bodies are only good        
+        for f, t, m in mailer.sent_messages :
+            self.assertTrue(m._payload in bodies_expected)
+
+        ## ok, can we break this?
+        
+        mailer.sent_messages = []
+        
+        for i in range(1,7) :
+            transaction.begin()
+            body = bodies_all[i]
+            message = sample_message(body=body)
+            msgid = delivery.send(fromaddr, toaddrs, message)
+            transaction.abort()
+            msgid = delivery.send(fromaddr, toaddrs, message)
+        b = transaction.manager.get()
+        import pdb
+        pdb.set_trace()
+        transaction.commit()
+
 
 
 def sample_message( body="This is just an example"):
